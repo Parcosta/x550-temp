@@ -1,0 +1,13 @@
+# Writes x550.prom for node_exporter's textfile collector
+# (node_exporter --collector.textfile.directory=/var/lib/node_exporter/textfile_collector).
+[Unit]
+Description=Export Intel X550 die temperature for node_exporter
+
+[Service]
+Type=oneshot
+# Remove the previous sample before starting: even a crash, timeout, or failed
+# ExecStart must leave the temperature absent rather than indefinitely stale.
+ExecStartPre=/bin/rm -f /var/lib/node_exporter/textfile_collector/x550.prom /var/lib/node_exporter/textfile_collector/x550.prom.tmp
+ExecStart=/bin/sh -c '/usr/local/sbin/x550-temp --prometheus > /var/lib/node_exporter/textfile_collector/x550.prom.tmp && mv /var/lib/node_exporter/textfile_collector/x550.prom.tmp /var/lib/node_exporter/textfile_collector/x550.prom'
+ExecStopPost=/bin/rm -f /var/lib/node_exporter/textfile_collector/x550.prom.tmp
+TimeoutStartSec=30s

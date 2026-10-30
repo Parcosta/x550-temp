@@ -1,0 +1,179 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+"""x550-temp: read the die temperature of Intel X550 10GBASE-T controllers on Linux.
+
+The X550 (X550-T1, X550-T2, X550-AT2) has an on-die thermal sensor, but neither the in-tree
+ixgbe driver nor Intel's out-of-tree one exposes it through hwmon, so `sensors` shows nothing.
+Intel's X550 datasheet (document 333369, section 5.7.3.1) says the junction temperature can be
+read from PHY register 1E.C820 "Global Thermal Status 1": 16 bits, 1/256 degC per LSB, +/-3 degC,
+valid when bit 0 of 1E.C821 is set, readable through the MDIO of PHY 0. Host software may read the
+thermal registers but must not change them, and this tool only reads.
+
+The read uses the standard SIOCGMIIREG ioctl with a clause-45 address. ixgbe services it through
+its own MDIO bus code, which takes the driver's software/firmware semaphore, so the read never
+races the card's firmware.
+
+Kernel quirk: since Linux 6.3 (commit 308c8ffd5a7d), ixgbe_mii_bus_read_c45() declares its
+arguments as (bus, devad, addr, regnum) while the MDIO core calls (bus, addr, devad, regnum), so the
+PHY address and device arrive swapped. This tool tries both encodings and accepts only a read whose
+PMA/PMD identifier (register 1.2) is the X550's 0x0154, so it works on affected kernels, on kernels
+older than 6.3, and on kernels where the bug has been fixed.
+
+Usage:
+  x550-temp                      one line per X550 chip: "<pci> <iface> <celsius>"
+  x550-temp --json               JSON array
+  x550-temp --prometheus         node_exporter textfile-collector format
+  x550-temp --statsd HOST:PORT   also send a gauge per chip (e.g. 127.0.0.1:8125 for Netdata)
+  x550-temp --watch SECONDS      repeat until interrupted
+
+The NIC ioctl needs root or CAP_NET_ADMIN. Exit status 1 if no X550 could be read.
+"""
+
+import argparse
+import fcntl
+import json
+import os
+import socket
+import struct
+import sys
+import time
+
+__version__ = "1.0.0"
+
+SIOCGMIIREG = 0x8948
+MDIO_PHY_ID_C45 = 0x8000
+X550_PMA_ID_HI = 0x0154      # Encoding check, not family identity: other Intel PHYs share this word.
+PHY0 = 0                     # the thermal sensor is reachable through PHY 0 only (datasheet 5.7.1)
+MMD_PMA, MMD_GLOBAL = 1, 0x1E
+REG_PMA_ID_HI, REG_TEMP, REG_TEMP_READY = 0x2, 0xC820, 0xC821
+X550_DEVICE_IDS = {"0x1563", "0x15d1"}  # X550-T2/AT2, X550-T1 (8086:1563, 8086:15d1)
+
+
+def ixgbe_interfaces():
+    """{pci_chip: [iface, ...]} for X550 ports bound to ixgbe. Both ports of a chip share one sensor."""
+    chips = {}
+    try:
+        interfaces = sorted(os.listdir("/sys/class/net"))
+    except FileNotFoundError:
+        return chips
+    for iface in interfaces:
+        dev = f"/sys/class/net/{iface}/device"
+        try:
+            if os.path.basename(os.readlink(f"{dev}/driver")) != "ixgbe":
+                continue
+            with open(f"{dev}/vendor") as f:
+                if f.read().strip() != "0x8086":
+                    continue
+            with open(f"{dev}/device") as f:
+                if f.read().strip() not in X550_DEVICE_IDS:
+                    continue
+            pci = os.path.basename(os.readlink(dev))
+        except OSError:
+            continue
+        chips.setdefault(pci.rsplit(".", 1)[0], []).append(iface)
+    return chips
+
+
+def _mdio_read(sock, iface, prtad, devad, reg):
+    req = struct.pack("16sHHHH8x", iface.encode(), MDIO_PHY_ID_C45 | (prtad << 5) | devad, reg, 0, 0)
+    return struct.unpack("16sHHHH8x", fcntl.ioctl(sock.fileno(), SIOCGMIIREG, req))[4]
+
+
+def read_chip(sock, ifaces):
+    """(celsius, iface) for one chip, or (None, reason)."""
+    reason = "no readable interface"
+    for iface in ifaces:
+        # Swapped first (Linux >= 6.3 until fixed), then the straight clause-45 encoding.
+        for swapped in (True, False):
+            def rd(devad, reg):
+                return _mdio_read(sock, iface, devad, PHY0, reg) if swapped else \
+                       _mdio_read(sock, iface, PHY0, devad, reg)
+            try:
+                if rd(MMD_PMA, REG_PMA_ID_HI) != X550_PMA_ID_HI:
+                    if reason == "no readable interface":
+                        reason = "unexpected PHY identifier"
+                    continue
+                if not rd(MMD_GLOBAL, REG_TEMP_READY) & 1:
+                    reason = "sensor not ready"
+                    continue
+                # Datasheet 333369, 10.6.29: signed 16-bit two's-complement,
+                # including valid zero and sub-zero temperatures when ready.
+                raw = rd(MMD_GLOBAL, REG_TEMP)
+                celsius = (raw - 0x10000 if raw & 0x8000 else raw) / 256.0
+            except PermissionError:
+                return None, "permission denied (requires root or CAP_NET_ADMIN)"
+            except OSError as e:
+                reason = f"ioctl failed: {e.strerror}"
+                continue
+            return round(celsius, 2), iface
+    return None, reason
+
+
+def read_all():
+    out = []
+    chips = ixgbe_interfaces()
+    if not chips:
+        return out
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        for chip, ifaces in sorted(chips.items()):
+            celsius, info = read_chip(sock, ifaces)
+            out.append({"pci": chip, "interfaces": ifaces, "celsius": celsius,
+                        "read_via": info if celsius is not None else None,
+                        "error": None if celsius is not None else info})
+    return out
+
+
+def prometheus(results):
+    lines = ["# HELP x550_temperature_celsius Intel X550 die temperature (PHY register 1E.C820).",
+             "# TYPE x550_temperature_celsius gauge"]
+    for r in results:
+        if r["celsius"] is not None:
+            lines.append(f'x550_temperature_celsius{{pci="{r["pci"]}",interfaces="{",".join(r["interfaces"])}"}} '
+                         f'{r["celsius"]}')
+    return "\n".join(lines)
+
+
+def send_statsd(results, target):
+    host, _, port = target.rpartition(":")
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    for r in results:
+        if r["celsius"] is not None:
+            name = "x550." + r["pci"].replace(":", "_").replace(".", "_") + ".temperature"
+            sock.sendto(f"{name}:{r['celsius']}|g".encode(), (host or "127.0.0.1", int(port)))
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="x550-temp", description="Read Intel X550 die temperature on Linux.")
+    ap.add_argument("--json", action="store_true", help="print JSON")
+    ap.add_argument("--prometheus", action="store_true", help="print node_exporter textfile format")
+    ap.add_argument("--statsd", metavar="HOST:PORT", help="also send gauges to a statsd server")
+    ap.add_argument("--watch", type=float, metavar="SECONDS", help="repeat every SECONDS")
+    ap.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    args = ap.parse_args(argv)
+
+    while True:
+        results = read_all()
+        if not results:
+            print("x550-temp: no Intel X550 ports bound to ixgbe found", file=sys.stderr)
+            return 1
+        if args.statsd:
+            send_statsd(results, args.statsd)
+        if args.json:
+            print(json.dumps(results))
+        elif args.prometheus:
+            print(prometheus(results))
+        else:
+            for r in results:
+                val = f"{r['celsius']:.2f}" if r["celsius"] is not None else f"unreadable ({r['error']})"
+                print(f"{r['pci']} {','.join(r['interfaces'])} {val}")
+        sys.stdout.flush()
+        if not args.watch:
+            return 0 if any(r["celsius"] is not None for r in results) else 1
+        time.sleep(args.watch)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)

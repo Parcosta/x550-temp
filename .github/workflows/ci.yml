@@ -1,0 +1,15 @@
+name: CI
+on: [push, pull_request]
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.8", "3.13"]
+    # Official images, because the runner image no longer carries Python 3.8.
+    container: python:${{ matrix.python }}-slim
+    steps:
+      - uses: actions/checkout@v4
+      - run: python -m py_compile x550-temp
+      - run: python x550-temp --version
+      - run: python -m unittest discover -s tests -v
