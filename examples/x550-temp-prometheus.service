@@ -8,6 +8,6 @@ Type=oneshot
 # Remove the previous sample before starting: even a crash, timeout, or failed
 # ExecStart must leave the temperature absent rather than indefinitely stale.
 ExecStartPre=/bin/rm -f /var/lib/node_exporter/textfile_collector/x550.prom /var/lib/node_exporter/textfile_collector/x550.prom.tmp
-ExecStart=/bin/sh -c '/usr/local/sbin/x550-temp --prometheus > /var/lib/node_exporter/textfile_collector/x550.prom.tmp && mv /var/lib/node_exporter/textfile_collector/x550.prom.tmp /var/lib/node_exporter/textfile_collector/x550.prom'
+ExecStart=/bin/sh -c '/usr/local/bin/x550-temp --prometheus > /var/lib/node_exporter/textfile_collector/x550.prom.tmp && mv /var/lib/node_exporter/textfile_collector/x550.prom.tmp /var/lib/node_exporter/textfile_collector/x550.prom'
 ExecStopPost=/bin/rm -f /var/lib/node_exporter/textfile_collector/x550.prom.tmp
 TimeoutStartSec=30s
