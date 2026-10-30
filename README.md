@@ -11,13 +11,13 @@ or statsd gauges.
 Requires Linux, Python 3.8 or later, and an X550 bound to the `ixgbe` driver.
 The network link does not need to be up.
 
-Download and install for your user account:
+Download and install system-wide:
 
 ```sh
 curl -fsSLo x550-temp https://raw.githubusercontent.com/Parcosta/x550-temp/main/x550-temp
-mkdir -p "$HOME/.local/bin"
-install -m 0755 x550-temp "$HOME/.local/bin/x550-temp"
-sudo "$HOME/.local/bin/x550-temp"
+sudo install -d /usr/local/bin
+sudo install -m 0755 x550-temp /usr/local/bin/x550-temp
+sudo x550-temp
 ```
 
 Example output — one line per chip, with temperature in °C:
@@ -29,46 +29,16 @@ Example output — one line per chip, with temperature in °C:
 
 ## Usage
 
-Read temperatures as JSON:
-
 ```sh
-sudo "$HOME/.local/bin/x550-temp" --json
-```
-
-Print metrics for a Prometheus textfile collector:
-
-```sh
-sudo "$HOME/.local/bin/x550-temp" --prometheus
-```
-
-Send statsd gauges, for example to Netdata:
-
-```sh
-sudo "$HOME/.local/bin/x550-temp" --statsd 127.0.0.1:8125
-```
-
-Repeat every five seconds until Ctrl-C:
-
-```sh
-sudo "$HOME/.local/bin/x550-temp" --watch 5
+sudo x550-temp --json                       # JSON
+sudo x550-temp --prometheus                 # Prometheus textfile metrics
+sudo x550-temp --statsd 127.0.0.1:8125        # Netdata or another statsd listener
+sudo x550-temp --watch 5                    # Repeat every five seconds until Ctrl-C
 ```
 
 Exit status is 0 when at least one chip was read, and 1 otherwise. Unreadable chips include
 a reason; they are never replaced with a fabricated 0 °C reading. JSON includes failures
 with `celsius: null`; Prometheus and statsd omit failed sensors.
-
-### Optional system-wide installation
-
-For all users, or for the monitoring examples below:
-
-```sh
-sudo install -d /usr/local/sbin
-sudo install -o root -g root -m 0755 x550-temp /usr/local/sbin/x550-temp
-sudo /usr/local/sbin/x550-temp
-```
-
-Writing to `/usr/local/sbin` requires administrator privileges. The usage options above
-also work with `/usr/local/sbin/x550-temp`.
 
 ## Why this is needed
 
@@ -152,7 +122,7 @@ mtime series. This catches a stopped timer that never starts another collection.
 To remove monitoring, disable and stop `x550-temp-prometheus.timer` and its service, remove
 those two unit files, reload systemd, and remove `x550.prom` and `x550.prom.tmp` from the
 collector directory. Remove the Netdata chart/alarm files if installed. Remove the executable
-from `$HOME/.local/bin/x550-temp` or `/usr/local/sbin/x550-temp`, as applicable. System-wide
+from `$HOME/.local/bin/x550-temp` or `/usr/local/bin/x550-temp`, as applicable. System-wide
 removal requires the same administrator privileges as installation.
 
 Suggested alert thresholds: warn above 85 °C and critical above 95 °C, using a 5-minute average.
@@ -178,6 +148,19 @@ been verified. Intel's [X540 FAQ, section 2.35](https://cdrdv2-public.intel.com/
 describes monitoring its thermal diode with an external sensor; that does not establish an
 X550-compatible digital interface or rule out other embedded sensing. Shared PHY ancestry
 or the broader ixgbe argument-order bug is not evidence of compatible temperature registers.
+
+## Optional user-local installation
+
+After downloading with the `curl` command above:
+
+```sh
+mkdir -p "$HOME/.local/bin"
+install -m 0755 x550-temp "$HOME/.local/bin/x550-temp"
+sudo "$HOME/.local/bin/x550-temp"
+```
+
+Use this full path in place of `x550-temp` in the usage examples. The systemd service uses
+`/usr/local/bin/x550-temp` and expects the default system-wide installation.
 
 ## Pinning an installation
 

@@ -29,7 +29,7 @@ class PrometheusServiceTests(unittest.TestCase):
                 def command(name):
                     return shlex.split(service[name].replace(
                         "/var/lib/node_exporter/textfile_collector", str(directory)).replace(
-                        "/usr/local/sbin/x550-temp", str(tool)))
+                        "/usr/local/bin/x550-temp", str(tool)))
                 subprocess.run(command("ExecStartPre"), check=True)
                 self.assertFalse(target.exists())
                 self.assertFalse(temporary.exists())
